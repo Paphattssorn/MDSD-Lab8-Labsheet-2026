@@ -56,7 +56,68 @@
 บันทึกโค้ดที่ Gemini ตอบกลับมาที่ด้านล่าง
 
 ```text
-บันทึกผลลัพธ์ที่นี่
+สำหรับการออกแบบตารางใน Drift สำหรับแอป Campus Marketplace เราจะเน้นที่ความเร็วในการแสดงผล (Caching) และความคงทนของข้อมูล (Persistence) โดยใช้โค้ดภาษา Dart ดังนี้ครับ
+1. ตาราง FavoriteProducts (รายการสินค้าที่ถูกใจ)
+ตารางนี้เน้นเก็บข้อมูล "Snapshot" ของสินค้า ณ เวลาที่กดถูกใจ เพื่อให้แสดงผลรายการ Favorite ได้ทันทีโดยไม่ต้องรอโหลด API
+code
+Dart
+import 'package:drift/drift.dart';
+
+class FavoriteProducts extends Table {
+  // ใช้ productId จาก API เป็น Primary Key เพื่อป้องกันการเก็บสินค้าซ้ำ
+  IntColumn get productId => integer()();
+
+  // ข้อมูลสินค้าสำหรับการแสดงผล UI
+  TextColumn get name => text().withLength(min: 1, max: 100)();
+  RealColumn get price => real()(); // ใช้ Real สำหรับราคาที่มีทศนิยม
+  TextColumn get imageUrl => text()(); // เก็บ URL รูปภาพ
+
+  // เก็บเวลาที่กดถูกใจ เพื่อใช้ในการ OrderBy
+  DateTimeColumn get likedAt => dateTime().withDefault(currentDateAndTime)();
+
+  @override
+  Set<Column> get primaryKey => {productId};
+}
+เหตุผลในการเลือกชนิดข้อมูล:
+IntColumn (productId): เนื่องจาก ID สินค้าจากระบบ Backend มักเป็นตัวเลข การใช้เป็น Primary Key ช่วยให้เราจัดการ (เพิ่ม/ลบ) ได้แม่นยำ
+RealColumn (price): เหมาะสำหรับข้อมูลราคาที่อาจมีเศษทศนิยม (เช่น 99.50)
+TextColumn: ใช้เก็บชื่อและ URL รูปภาพ เนื่องจาก SQLite จัดการข้อความได้มีประสิทธิภาพอยู่แล้ว
+DateTimeColumn (likedAt): สำคัญมากสำหรับการเรียงลำดับ (Sorting) โดยเรากำหนด withDefault(currentDateAndTime) เพื่อให้ Drift ใส่เวลาปัจจุบันให้โดยอัตโนมัติเมื่อมีการ Insert
+2. ตาราง ProductDrafts (ร่างประกาศขายสินค้าจาก AI)
+ตารางนี้ออกแบบมาเพื่อรองรับข้อมูลที่ "อาจจะยังไม่ครบถ้วน" (Nullable) เพราะอยู่ในขั้นตอนร่าง
+code
+Dart
+class ProductDrafts extends Table {
+  // Primary Key แบบ Auto Increment สำหรับร่างประกาศแต่ละฉบับ
+  IntColumn get id => integer().autoIncrement()();
+
+  // ข้อมูลที่ AI แนะนำมา (อนุญาตให้เป็น Null ได้เผื่อ AI วิเคราะห์ไม่ได้บางส่วน)
+  TextColumn get title => text().nullable().withLength(max: 100)();
+  TextColumn get category => text().nullable()();
+  TextColumn get description => text().nullable()();
+
+  // เก็บ Path ของรูปภาพที่อยู่ในเครื่อง (Local File Path)
+  TextColumn get imagePath => text().nullable()();
+
+  // เก็บเวลาที่แก้ไขล่าสุด
+  DateTimeColumn get lastEditedAt => dateTime().withDefault(currentDateAndTime)();
+}
+เหตุผลในการเลือกชนิดข้อมูล:
+autoIncrement() (id): ร่างประกาศยังไม่มี ID จาก Server เราจึงต้องให้ฐานข้อมูลสร้าง Local ID ขึ้นมาเอง
+.nullable(): เนื่องจากเป็น "ร่าง" (Draft) ผู้ใช้อาจจะยังกรอกข้อมูลไม่ครบ หรือ AI อาจจะสรุปหมวดหมู่ไม่ได้ เราจึงต้องยอมให้คอลัมน์เหล่านี้ว่างได้ เพื่อไม่ให้แอปแครชเวลาบันทึก
+imagePath (TextColumn): เราจะไม่เก็บไฟล์รูปภาพลงใน DB โดยตรง (เพราะจะทำให้ DB อืด) แต่จะเก็บเป็น String Path (เช่น /data/user/0/.../image.jpg) แทน ซึ่งเป็นวิธีมาตรฐานใน Mobile Dev
+lastEditedAt: ใช้สำหรับแสดงผลว่า "แก้ไขเมื่อ 5 นาทีที่แล้ว" และใช้เรียงลำดับร่างที่เพิ่งทำค้างไว้ขึ้นมาด้านบนสุด
+ข้อแนะนำเพิ่มเติมในการใช้งาน Drift:
+การดึงข้อมูล Favorite เรียงตามเวลา:
+code
+Dart
+// ตัวอย่าง Query ใน DAO หรือ Database Class
+(select(favoriteProducts)..orderBy([(t) => OrderingTerm.desc(t.likedAt)])).get();
+การบันทึก Draft (Upsert):
+หากต้องการบันทึกทับร่างเดิมเมื่อมีการแก้ไข ให้ใช้คำสั่ง into(productDrafts).insertOnConflictUpdate(entity).
+Type Converters (ขั้นสูง):
+หากในอนาคตสินค้าหนึ่งชิ้นมี หลายรูปภาพ คุณอาจต้องเก็บเป็น List<String> ในตาราง Draft แนะนำให้ศึกษาเรื่อง TypeConverter ของ Drift เพื่อแปลง List เป็น JSON String ก่อนลง DB ครับ
+ต้องการให้ช่วยเขียนส่วนของ Database Class หรือ DAO (Data Access Object) เพื่อจัดการข้อมูลในตารางเหล่านี้ต่อไหมครับ?
 ```
 
 
